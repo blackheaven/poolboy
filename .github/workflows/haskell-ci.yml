@@ -122,8 +122,7 @@ jobs:
       - name: initial cabal.project for sdist
         run: |
           touch cabal.project
-          echo "packages: $GITHUB_WORKSPACE/source/adhoc-fixtures-hspec" >> cabal.project
-          echo "packages: $GITHUB_WORKSPACE/source/adhoc-fixtures" >> cabal.project
+          echo "packages: $GITHUB_WORKSPACE/source/poolboy" >> cabal.project
           cat cabal.project
       - name: sdist
         run: |
@@ -135,22 +134,17 @@ jobs:
           find sdist -maxdepth 1 -type f -name '*.tar.gz' -exec tar -C $GITHUB_WORKSPACE/unpacked -xzvf {} \;
       - name: generate cabal.project
         run: |
-          PKGDIR_adhoc_fixtures_hspec="$(find "$GITHUB_WORKSPACE/unpacked" -maxdepth 1 -type d -regex '.*/adhoc-fixtures-hspec-[0-9.]*')"
-          echo "PKGDIR_adhoc_fixtures_hspec=${PKGDIR_adhoc_fixtures_hspec}" >> "$GITHUB_ENV"
-          PKGDIR_adhoc_fixtures="$(find "$GITHUB_WORKSPACE/unpacked" -maxdepth 1 -type d -regex '.*/adhoc-fixtures-[0-9.]*')"
-          echo "PKGDIR_adhoc_fixtures=${PKGDIR_adhoc_fixtures}" >> "$GITHUB_ENV"
+          PKGDIR_poolboy="$(find "$GITHUB_WORKSPACE/unpacked" -maxdepth 1 -type d -regex '.*/poolboy-[0-9.]*')"
+          echo "PKGDIR_poolboy=${PKGDIR_poolboy}" >> "$GITHUB_ENV"
           rm -f cabal.project cabal.project.local
           touch cabal.project
           touch cabal.project.local
-          echo "packages: ${PKGDIR_adhoc_fixtures_hspec}" >> cabal.project
-          echo "packages: ${PKGDIR_adhoc_fixtures}" >> cabal.project
-          echo "package adhoc-fixtures-hspec" >> cabal.project
+          echo "packages: ${PKGDIR_poolboy}" >> cabal.project
           echo "    ghc-options: -Werror=missing-methods" >> cabal.project
-          echo "package adhoc-fixtures" >> cabal.project
+          echo "package poolboy" >> cabal.project
           echo "    ghc-options: -Werror=missing-methods" >> cabal.project
           cat >> cabal.project <<EOF
           EOF
-          $HCPKG list --simple-output --names-only | perl -ne 'for (split /\s+/) { print "constraints: $_ installed\n" unless /^(adhoc-fixtures|adhoc-fixtures-hspec)$/; }' >> cabal.project.local
           cat cabal.project
           cat cabal.project.local
       - name: dump install plan
@@ -167,7 +161,6 @@ jobs:
         run: |
           $CABAL v2-build $ARG_COMPILER --disable-tests --disable-benchmarks --dependencies-only -j2 all
           $CABAL v2-build $ARG_COMPILER $ARG_TESTS $ARG_BENCH --dependencies-only -j2 all
-          $CABAL install $ARG_COMPILER hspec-discover
       - name: build w/o tests
         run: |
           $CABAL v2-build $ARG_COMPILER --disable-tests --disable-benchmarks all
@@ -179,9 +172,7 @@ jobs:
           $CABAL v2-test $ARG_COMPILER $ARG_TESTS $ARG_BENCH all --test-show-details=direct
       - name: cabal check
         run: |
-          cd ${PKGDIR_adhoc_fixtures_hspec} || false
-          ${CABAL} -vnormal check
-          cd ${PKGDIR_adhoc_fixtures} || false
+          cd ${PKGDIR_poolboy} || false
           ${CABAL} -vnormal check
       - name: haddock
         run: |
