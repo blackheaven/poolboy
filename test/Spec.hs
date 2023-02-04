@@ -90,9 +90,8 @@ _isStopWorkQueue wq =
   not <$> isEmptyMVar wq.stopped
 
 waitStopWorkQueue :: WorkQueue -> IO ()
-waitStopWorkQueue wq = do
-  takeMVar wq.stopped
-  void $ tryPutMVar wq.stopped ()
+waitStopWorkQueue wq =
+  readMVar wq.stopped
 
 enqueue :: WorkQueue -> IO () -> IO ()
 enqueue wq =
