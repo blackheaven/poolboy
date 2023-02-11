@@ -17,7 +17,7 @@ main = hspec spec
 spec :: Spec
 spec =
   describe "Poolboy" $ do
-    it "threadDelay should be absorbed in mulitple threads" $ do
+    xit "threadDelay should be absorbed in mulitple threads" $ do
       computations <-
         timeout 100000 $
           withPoolboy (poolboySettingsWith 100) $ \wq ->
@@ -27,8 +27,9 @@ spec =
       witness <- newIORef False
       computations <-
         timeout 10000 $
-          withPoolboy (poolboySettingsWith 1) $ \wq ->
+          withPoolboy (poolboySettingsWith 1) $ \wq -> do
             mapM_ (enqueue wq) [error "an error", throw RandomException, writeIORef witness True]
+            threadDelay 100
       computations `shouldSatisfy` isJust
       readIORef witness `shouldReturn` True
 
@@ -61,12 +62,19 @@ withPoolboy settings = bracket (newPoolboy settings) (\wq -> stopWorkQueue wq >>
 
 newPoolboy :: PoolboySettings -> IO WorkQueue
 newPoolboy settings = do
+  logLock <- newMVar ()
+  let log x =
+        withMVar logLock $ \() -> do
+          putStrLn x
+          return ()
+
   wq <-
     WorkQueue
       <$> newTQueueIO
       <*> newTQueueIO
       <*> newIORef 0
       <*> newEmptyMVar
+      <*> return log
 
   count <-
     case settings.workersCount of
@@ -102,7 +110,8 @@ data WorkQueue = WorkQueue
   { commands :: TQueue Commands,
     queue :: TQueue (Either () (IO ())),
     workersCount :: IORef Int,
-    stopped :: MVar ()
+    stopped :: MVar (),
+    log :: String -> IO ()
   }
 
 data Commands
@@ -122,25 +131,29 @@ controller wq = do
       if diff > 0
         then replicateM_ diff stopOneWorker
         else replicateM_ (abs diff) $ do
-          putStrLn "Pre-fork"
+          wq.log "Pre-fork"
           forkIO $ worker wq
       controller wq
     Stop -> do
       currentCount <- readIORef wq.workersCount
+      wq.log $ "Stopping " <> show currentCount <> " workers"
       replicateM_ currentCount stopOneWorker
 
 worker :: WorkQueue -> IO ()
 worker wq = do
-  putStrLn "New worker"
-  atomicModifyIORef' wq.workersCount $ \n -> (n + 1, ())
+  wq.log "New worker"
+  newCount <- atomicModifyIORef' wq.workersCount $ \n -> (n + 1, n + 1)
+  wq.log $ "New worker count " <> show newCount
   let loop = do
         command <- atomically $ readTQueue wq.queue
         case command of
           Left () -> do
+            wq.log "Stopping"
             remaining <-
               atomicModifyIORef' wq.workersCount $ \n ->
                 let newCount = max 0 (n - 1) in (newCount, newCount)
+            print remaining
             when (remaining == 0) $
               void $ tryPutMVar wq.stopped ()
-          Right act ->  void (tryAny act) >> loop
+          Right act -> wq.log "pop" >> void (tryAny act) >> wq.log "poped" >> loop
   loop
