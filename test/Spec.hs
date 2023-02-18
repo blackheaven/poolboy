@@ -17,21 +17,25 @@ main = hspec spec
 spec :: Spec
 spec =
   describe "Poolboy" $ do
-    xit "threadDelay should be absorbed in mulitple threads" $ do
+    it "threadDelay should be absorbed in mulitple threads" $ do
       computations <-
-        timeout 100000 $
-          withPoolboy (poolboySettingsWith 100) $ \wq ->
-            replicateM_ 1000 $ enqueue wq $ threadDelay 1000
+        timeout 2500 $
+          withPoolboy (poolboySettingsWith 100) $ \wq -> do
+            replicateM_ 100 $ enqueue wq $ threadDelay 1000
+            waitReadyQueue wq
+            threadDelay 1000
       computations `shouldSatisfy` isJust
-    it "should be resilient to errors and Exceptions" $ do
-      witness <- newIORef False
-      computations <-
-        timeout 10000 $
-          withPoolboy (poolboySettingsWith 1) $ \wq -> do
-            mapM_ (enqueue wq) [error "an error", throw RandomException, writeIORef witness True]
-            threadDelay 100
-      computations `shouldSatisfy` isJust
-      readIORef witness `shouldReturn` True
+    replicateM_ 1 $
+      it "should be resilient to errors and Exceptions" $ do
+        witness <- newIORef False
+        computations <-
+          timeout 10000 $
+            withPoolboy (poolboySettingsWith 5) $ \wq -> do
+              mapM_ (enqueue wq) [error "an error", throw RandomException, writeIORef witness True]
+              waitReadyQueue wq
+              threadDelay 100
+        computations `shouldSatisfy` isJust
+        readIORef witness `shouldReturn` True
 
 data RandomException = RandomException
   deriving (Show)
@@ -39,8 +43,9 @@ data RandomException = RandomException
 instance Exception RandomException
 
 -- Public
-newtype PoolboySettings = PoolboySettings
-  { workersCount :: WorkersCountSettings
+data PoolboySettings = PoolboySettings
+  { workersCount :: WorkersCountSettings,
+    log :: String -> IO ()
   }
 
 data WorkersCountSettings
@@ -51,22 +56,26 @@ data WorkersCountSettings
 _defaultPoolboySettings :: PoolboySettings
 _defaultPoolboySettings =
   PoolboySettings
-    { workersCount = CapabilitiesWCS
+    { workersCount = CapabilitiesWCS,
+      log = \_ -> return ()
     }
 
 poolboySettingsWith :: Int -> PoolboySettings
-poolboySettingsWith = PoolboySettings . FixedWCS
+poolboySettingsWith c = _defaultPoolboySettings { workersCount = FixedWCS c }
+
+_simpleSerializedLogger :: IO (String -> IO ())
+_simpleSerializedLogger = do
+  logLock <- newMVar ()
+  return $ \x ->
+        withMVar logLock $ \() -> do
+          putStrLn x
+          return ()
 
 withPoolboy :: PoolboySettings -> (WorkQueue -> IO a) -> IO a
 withPoolboy settings = bracket (newPoolboy settings) (\wq -> stopWorkQueue wq >> waitStopWorkQueue wq)
 
 newPoolboy :: PoolboySettings -> IO WorkQueue
 newPoolboy settings = do
-  logLock <- newMVar ()
-  let log x =
-        withMVar logLock $ \() -> do
-          putStrLn x
-          return ()
 
   wq <-
     WorkQueue
@@ -74,12 +83,13 @@ newPoolboy settings = do
       <*> newTQueueIO
       <*> newIORef 0
       <*> newEmptyMVar
-      <*> return log
+      <*> return settings.log
 
   count <-
     case settings.workersCount of
       CapabilitiesWCS -> getNumCapabilities
       FixedWCS x -> return x
+
   changeDesiredWorkersCount wq count
   void $ forkIO $ controller wq
 
@@ -105,6 +115,12 @@ enqueue :: WorkQueue -> IO () -> IO ()
 enqueue wq =
   atomically . writeTQueue wq.queue . Right
 
+waitReadyQueue :: WorkQueue -> IO ()
+waitReadyQueue wq = do
+  ready <- newEmptyMVar
+  enqueue wq $ putMVar ready ()
+  readMVar ready
+
 -- private
 data WorkQueue = WorkQueue
   { commands :: TQueue Commands,
@@ -123,7 +139,7 @@ controller :: WorkQueue -> IO ()
 controller wq = do
   command <- atomically $ readTQueue wq.commands
   let stopOneWorker = atomically $ writeTQueue wq.queue $ Left ()
-  print command
+  wq.log $ "Command: " <> show command
   case command of
     ChangeDesiredWorkersCount n -> do
       currentCount <- readIORef wq.workersCount
@@ -152,7 +168,7 @@ worker wq = do
             remaining <-
               atomicModifyIORef' wq.workersCount $ \n ->
                 let newCount = max 0 (n - 1) in (newCount, newCount)
-            print remaining
+            wq.log $ "Remaining: " <> show remaining
             when (remaining == 0) $
               void $ tryPutMVar wq.stopped ()
           Right act -> wq.log "pop" >> void (tryAny act) >> wq.log "poped" >> loop
