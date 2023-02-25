@@ -121,6 +121,12 @@ waitReadyQueue wq = do
   enqueue wq $ putMVar ready ()
   readMVar ready
 
+_enqueueAfter :: Foldable f => WorkQueue -> IO () -> f (IO ()) -> IO ()
+_enqueueAfter wq x xs =
+  enqueue wq $ do
+    x
+    forM_ xs $ enqueue wq
+
 -- private
 data WorkQueue = WorkQueue
   { commands :: TQueue Commands,
@@ -167,7 +173,7 @@ worker wq = do
             wq.log "Stopping"
             remaining <-
               atomicModifyIORef' wq.workersCount $ \n ->
-                let newCount = max 0 (n - 1) in (newCount, newCount)
+                let count = max 0 (n - 1) in (count, count)
             wq.log $ "Remaining: " <> show remaining
             when (remaining == 0) $
               void $ tryPutMVar wq.stopped ()
