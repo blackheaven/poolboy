@@ -83,6 +83,4 @@ test-suite poolboy-test
     , poolboy
     , hspec
     , hspec-core
-    , safe-exceptions
-    , stm
   default-language: Haskell2010
