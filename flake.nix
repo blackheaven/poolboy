@@ -4,7 +4,6 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs";
     flake-utils.url = "github:numtide/flake-utils";
-    yarl.url = "github:blackheaven/yarl";
   };
 
   outputs = inputs@{ self, nixpkgs, flake-utils, ... }:
