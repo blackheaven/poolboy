@@ -7,6 +7,7 @@ module Data.Poolboy
     simpleSerializedLogger,
 
     -- * Running
+    WorkQueue,
     withPoolboy,
     newPoolboy,
     stopWorkQueue,
