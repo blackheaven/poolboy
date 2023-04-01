@@ -18,20 +18,16 @@ spec =
     it "threadDelay should be absorbed in mulitple threads" $ do
       computations <-
         timeout 2500 $
-          withPoolboy (poolboySettingsWith 100) $ \wq -> do
+          withPoolboy (poolboySettingsWith 100) waitingStopFinishWorkers $ \wq -> do
             replicateM_ 100 $ enqueue wq $ threadDelay 1000
-            waitReadyQueue wq
-            threadDelay 1000
       computations `shouldSatisfy` isJust
     replicateM_ 1 $
       it "should be resilient to errors and Exceptions" $ do
         witness <- newIORef False
         computations <-
           timeout 10000 $
-            withPoolboy (poolboySettingsWith 5) $ \wq -> do
+            withPoolboy (poolboySettingsWith 5) waitingStopFinishWorkers $ \wq -> do
               mapM_ (enqueue wq) [error "an error", throw RandomException, writeIORef witness True]
-              waitReadyQueue wq
-              threadDelay 100
         computations `shouldSatisfy` isJust
         readIORef witness `shouldReturn` True
 

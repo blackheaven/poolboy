@@ -1,6 +1,6 @@
 cabal-version:       3.0
 name:                poolboy
-version:             0.1.0.1
+version:             0.2.0.0
 author:              Gautier DI FOLCO
 maintainer:          gautier.difolco@gmail.com
 category:            Data
@@ -18,6 +18,7 @@ library
       base == 4.*
     , safe-exceptions == 0.1.*
     , stm == 2.*
+    , async == 2.*
   hs-source-dirs: src
   exposed-modules:
       Data.Poolboy

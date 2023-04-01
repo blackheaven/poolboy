@@ -10,12 +10,17 @@ module Data.Poolboy
     WorkQueue,
     withPoolboy,
     newPoolboy,
-    stopWorkQueue,
-    isStopWorkQueue,
 
     -- * Driving
     changeDesiredWorkersCount,
     waitReadyQueue,
+
+    -- * Stopping
+    stopWorkQueue,
+    isStopedWorkQueue,
+    WaitingStopStrategy,
+    waitingStopTimeout,
+    waitingStopFinishWorkers,
 
     -- * Enqueueing
     enqueue,
@@ -24,11 +29,13 @@ module Data.Poolboy
 where
 
 import Control.Concurrent
+import Control.Concurrent.Async
 import Control.Concurrent.STM.TQueue
 import Control.Exception.Safe (bracket, tryAny)
 import Control.Monad
 import Control.Monad.STM
-import Data.IORef
+import Data.Maybe (isNothing)
+import System.Timeout (timeout)
 
 -- | Initial settings
 data PoolboySettings = PoolboySettings
@@ -65,8 +72,8 @@ simpleSerializedLogger = do
       return ()
 
 -- | 'backet'-based usage (recommended)
-withPoolboy :: PoolboySettings -> (WorkQueue -> IO a) -> IO a
-withPoolboy settings = bracket (newPoolboy settings) (\wq -> stopWorkQueue wq >> waitStopWorkQueue wq)
+withPoolboy :: PoolboySettings -> WaitingStopStrategy -> (WorkQueue -> IO a) -> IO a
+withPoolboy settings waitStopWorkQueue = bracket (newPoolboy settings) (\wq -> stopWorkQueue wq >> waitStopWorkQueue wq)
 
 -- | Standalone/manual usage
 newPoolboy :: PoolboySettings -> IO WorkQueue
@@ -75,7 +82,6 @@ newPoolboy settings = do
     WorkQueue
       <$> newTQueueIO
       <*> newTQueueIO
-      <*> newIORef 0
       <*> newEmptyMVar
       <*> return settings.log
 
@@ -85,7 +91,7 @@ newPoolboy settings = do
       FixedWCS x -> return x
 
   changeDesiredWorkersCount wq count
-  void $ forkIO $ controller wq
+  void $ forkIO $ controller wq []
 
   return wq
 
@@ -100,14 +106,20 @@ stopWorkQueue wq =
   atomically $ writeTQueue wq.commands Stop
 
 -- | Non-blocking check of the work queue's running status
-isStopWorkQueue :: WorkQueue -> IO Bool
-isStopWorkQueue wq =
+isStopedWorkQueue :: WorkQueue -> IO Bool
+isStopedWorkQueue wq =
   not <$> isEmptyMVar wq.stopped
 
+type WaitingStopStrategy = WorkQueue -> IO ()
+
 -- | Block until the queue is totally stopped (no more running worker)
-waitStopWorkQueue :: WorkQueue -> IO ()
-waitStopWorkQueue wq =
+waitingStopFinishWorkers :: WaitingStopStrategy
+waitingStopFinishWorkers wq =
   void $ tryAny $ readMVar wq.stopped
+
+-- | Block until the queue is totally stopped or deadline (in micro seconds) is reached
+waitingStopTimeout :: Int -> WaitingStopStrategy
+waitingStopTimeout delay wq = void $ timeout delay $ waitingStopFinishWorkers wq
 
 -- | Enqueue one action in the work queue (non-blocking)
 enqueue :: WorkQueue -> IO () -> IO ()
@@ -132,7 +144,6 @@ enqueueAfter wq x xs =
 data WorkQueue = WorkQueue
   { commands :: TQueue Commands,
     queue :: TQueue (Either () (IO ())),
-    currentWorkersCount :: IORef Int,
     stopped :: MVar (),
     log :: String -> IO ()
   }
@@ -142,42 +153,40 @@ data Commands
   | Stop
   deriving stock (Show)
 
-controller :: WorkQueue -> IO ()
-controller wq = do
+controller :: WorkQueue -> [Async ()]  -> IO ()
+controller wq workers = do
   command <- atomically $ readTQueue wq.commands
   let stopOneWorker = atomically $ writeTQueue wq.queue $ Left ()
+      getLiveWorkers = filterM (fmap isNothing . poll) workers
   wq.log $ "Command: " <> show command
   case command of
     ChangeDesiredWorkersCount n -> do
-      currentCount <- readIORef wq.currentWorkersCount
-      let diff = currentCount - n
-      if diff > 0
-        then replicateM_ diff stopOneWorker
-        else replicateM_ (abs diff) $ do
-          wq.log "Pre-fork"
-          forkIO $ worker wq
-      controller wq
+      liveWorkers <- getLiveWorkers
+      let diff = length liveWorkers - n
+      newWorkers <-
+        if diff > 0
+          then do
+            replicateM_ diff stopOneWorker
+            return []
+          else replicateM (abs diff) $ do
+            wq.log "Pre-fork"
+            async $ worker wq
+      controller wq $ newWorkers <> liveWorkers
     Stop -> do
-      currentCount <- readIORef wq.currentWorkersCount
+      liveWorkers <- getLiveWorkers
+      let currentCount = length liveWorkers
       wq.log $ "Stopping " <> show currentCount <> " workers"
       replicateM_ currentCount stopOneWorker
+      forM_ liveWorkers waitCatch
+      void $ tryPutMVar wq.stopped ()
 
 worker :: WorkQueue -> IO ()
 worker wq = do
   wq.log "New worker"
-  newCount <- atomicModifyIORef' wq.currentWorkersCount $ \n -> (n + 1, n + 1)
-  wq.log $ "New worker count " <> show newCount
   let loop = do
         command <- atomically $ readTQueue wq.queue
         case command of
           Left () -> do
             wq.log "Stopping"
-            remaining <-
-              atomicModifyIORef' wq.currentWorkersCount $ \n ->
-                let count = max 0 (n - 1) in (count, count)
-            wq.log $ "Remaining: " <> show remaining
-            when (remaining == 0) $
-              void $
-                tryPutMVar wq.stopped ()
           Right act -> wq.log "pop" >> void (tryAny act) >> wq.log "poped" >> loop
   loop
