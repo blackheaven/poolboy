@@ -83,7 +83,7 @@ newPoolboy settings = do
       <$> newTQueueIO
       <*> newTQueueIO
       <*> newEmptyMVar
-      <*> return settings.log
+      <*> newQSemN 0
 
   count <-
     case settings.workersCount of
@@ -91,7 +91,18 @@ newPoolboy settings = do
       FixedWCS x -> return x
 
   changeDesiredWorkersCount wq count
-  void $ forkIO $ controller wq []
+  void $
+    forkIO $
+      controller $
+        WorkQueueControllerState
+          {commands = wq.commands,
+            queue = wq.queue,
+            stopped = wq.stopped,
+            log = settings.log,
+            workers = [],
+            waitingWorkers = wq.waitingWorkers,
+            capabilityCount = 0
+          }
 
   return wq
 
@@ -129,9 +140,8 @@ enqueue wq =
 -- | Block until one worker is available
 waitReadyQueue :: WorkQueue -> IO ()
 waitReadyQueue wq = do
-  ready <- newEmptyMVar
-  enqueue wq $ putMVar ready ()
-  readMVar ready
+  waitQSemN wq.waitingWorkers 1
+  signalQSemN wq.waitingWorkers 1
 
 -- | Enqueue action and some actions to be run after it
 enqueueAfter :: Foldable f => WorkQueue -> IO () -> f (IO ()) -> IO ()
@@ -145,7 +155,7 @@ data WorkQueue = WorkQueue
   { commands :: TQueue Commands,
     queue :: TQueue (Either () (IO ())),
     stopped :: MVar (),
-    log :: String -> IO ()
+    waitingWorkers :: QSemN
   }
 
 data Commands
@@ -153,40 +163,68 @@ data Commands
   | Stop
   deriving stock (Show)
 
-controller :: WorkQueue -> [Async ()]  -> IO ()
-controller wq workers = do
+data WorkQueueControllerState = WorkQueueControllerState
+  { commands :: TQueue Commands,
+    queue :: TQueue (Either () (IO ())),
+    stopped :: MVar (),
+    log :: String -> IO (),
+    workers :: [Async ()],
+    waitingWorkers :: QSemN,
+    capabilityCount :: Int
+  }
+
+controller :: WorkQueueControllerState -> IO ()
+controller wq = do
   command <- atomically $ readTQueue wq.commands
   let stopOneWorker = atomically $ writeTQueue wq.queue $ Left ()
-      getLiveWorkers = filterM (fmap isNothing . poll) workers
-  wq.log $ "Command: " <> show command
+      getLiveWorkers = filterM (fmap isNothing . poll) wq.workers
+      prefix = "Controller: "
+  wq.log $ prefix <> "Command: " <> show command
   case command of
     ChangeDesiredWorkersCount n -> do
       liveWorkers <- getLiveWorkers
       let diff = length liveWorkers - n
-      newWorkers <-
+      (newWorkers, newCapabilityCount) <-
         if diff > 0
           then do
             replicateM_ diff stopOneWorker
-            return []
-          else replicateM (abs diff) $ do
-            wq.log "Pre-fork"
-            async $ worker wq
-      controller wq $ newWorkers <> liveWorkers
+            return ([], wq.capabilityCount)
+          else do
+            let newWorkersCount = abs diff
+            newWorkers <- forM [1..newWorkersCount] $ \capability -> do
+              wq.log $ prefix <> "Pre-fork"
+              asyncOn (capability - 1) $ worker $ WorkQueueWorkerState{queue = wq.queue, waitingWorkers = wq.waitingWorkers, log = wq.log}
+            return (newWorkers, wq.capabilityCount + newWorkersCount)
+      controller $ wq { workers = newWorkers <> liveWorkers, capabilityCount = newCapabilityCount }
     Stop -> do
       liveWorkers <- getLiveWorkers
       let currentCount = length liveWorkers
-      wq.log $ "Stopping " <> show currentCount <> " workers"
+      wq.log $ prefix <> "Stopping " <> show currentCount <> " workers"
+      waitQSemN wq.waitingWorkers currentCount
       replicateM_ currentCount stopOneWorker
-      forM_ liveWorkers waitCatch
       void $ tryPutMVar wq.stopped ()
 
-worker :: WorkQueue -> IO ()
+data WorkQueueWorkerState = WorkQueueWorkerState
+  { queue :: TQueue (Either () (IO ())),
+    waitingWorkers :: QSemN,
+    log :: String -> IO ()
+  }
+
+worker :: WorkQueueWorkerState -> IO ()
 worker wq = do
-  wq.log "New worker"
+  workerId <- show <$> myThreadId
+  let prefix = "Worker [" <> workerId <> "]: "
+  wq.log $ prefix <> "Starting"
   let loop = do
+        signalQSemN wq.waitingWorkers 1
         command <- atomically $ readTQueue wq.queue
         case command of
           Left () -> do
-            wq.log "Stopping"
-          Right act -> wq.log "pop" >> void (tryAny act) >> wq.log "poped" >> loop
+            wq.log $ prefix <> "Stopping"
+          Right act -> do
+            waitQSemN wq.waitingWorkers 1
+            wq.log (prefix <> "pop")
+            void (tryAny act)
+            wq.log (prefix <> "poped")
+            loop
   loop
