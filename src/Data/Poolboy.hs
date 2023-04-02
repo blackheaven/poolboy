@@ -95,7 +95,7 @@ newPoolboy settings = do
     forkIO $
       controller $
         WorkQueueControllerState
-          {commands = wq.commands,
+          { commands = wq.commands,
             queue = wq.queue,
             stopped = wq.stopped,
             log = settings.log,
@@ -191,11 +191,11 @@ controller wq = do
             return ([], wq.capabilityCount)
           else do
             let newWorkersCount = abs diff
-            newWorkers <- forM [1..newWorkersCount] $ \capability -> do
+            newWorkers <- forM [1 .. newWorkersCount] $ \capability -> do
               wq.log $ prefix <> "Pre-fork"
-              asyncOn (capability - 1) $ worker $ WorkQueueWorkerState{queue = wq.queue, waitingWorkers = wq.waitingWorkers, log = wq.log}
+              asyncOn (capability - 1) $ worker $ WorkQueueWorkerState {queue = wq.queue, waitingWorkers = wq.waitingWorkers, log = wq.log}
             return (newWorkers, wq.capabilityCount + newWorkersCount)
-      controller $ wq { workers = newWorkers <> liveWorkers, capabilityCount = newCapabilityCount }
+      controller $ wq {workers = newWorkers <> liveWorkers, capabilityCount = newCapabilityCount}
     Stop -> do
       liveWorkers <- getLiveWorkers
       let currentCount = length liveWorkers
