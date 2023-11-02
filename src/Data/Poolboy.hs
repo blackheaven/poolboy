@@ -31,11 +31,11 @@ where
 import Control.Concurrent
 import Control.Concurrent.Async
 import Control.Concurrent.STM.TQueue
-import Control.Exception.Safe (bracket, tryAny)
 import Control.Monad
 import Control.Monad.STM
 import Data.Maybe (isNothing)
 import System.Timeout (timeout)
+import UnliftIO.Exception (bracket, tryAny)
 
 -- | Initial settings
 data PoolboySettings = PoolboySettings
