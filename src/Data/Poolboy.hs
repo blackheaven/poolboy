@@ -55,7 +55,7 @@ defaultPoolboySettings :: PoolboySettings
 defaultPoolboySettings =
   PoolboySettings
     { workersCount = CapabilitiesWCS,
-      log = \_ -> return ()
+      log = \x -> seq x $ return ()
     }
 
 -- | Arbitrary-numbered settings
