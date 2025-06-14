@@ -1,10 +1,12 @@
+{-# LANGUAGE TupleSections #-}
+
 module Data.Poolboy
   ( -- * Configuration
     PoolboySettings (..),
     WorkersCountSettings (..),
     defaultPoolboySettings,
     poolboySettingsWith,
-    simpleSerializedLogger,
+    poolboySettingsName,
 
     -- * Running
     WorkQueue,
@@ -24,24 +26,34 @@ module Data.Poolboy
 
     -- * Enqueueing
     enqueue,
+    enqueueTracking,
     enqueueAfter,
+    enqueueAfterTracking,
+    WorkQueueStoppedException,
   )
 where
 
-import Control.Concurrent
-import Control.Concurrent.Async
-import Control.Concurrent.STM.TQueue
+import Control.Exception (BlockedIndefinitelyOnMVar (BlockedIndefinitelyOnMVar))
 import Control.Monad
-import Control.Monad.STM
-import Data.Maybe (isNothing)
-import System.Timeout (timeout)
-import UnliftIO.Exception (bracket, tryAny)
+import Data.Functor (($>))
+import qualified Data.HashMap.Strict as HM
+import Data.Maybe (listToMaybe)
+import GHC.Conc (labelThread)
+import GHC.Stack (HasCallStack, callStack, getCallStack, prettySrcLoc, withFrozenCallStack)
+import UnliftIO (MonadIO (liftIO), MonadUnliftIO)
+import UnliftIO.Async
+import UnliftIO.Concurrent
+import UnliftIO.Exception
+import UnliftIO.IORef
+import UnliftIO.QSemN
+import UnliftIO.Timeout (timeout)
 
 -- | Initial settings
 data PoolboySettings = PoolboySettings
   { workersCount :: WorkersCountSettings,
-    log :: String -> IO ()
+    workQueueName :: String
   }
+  deriving stock (Eq, Show)
 
 -- | Initial number of threads
 data WorkersCountSettings
@@ -50,181 +62,190 @@ data WorkersCountSettings
   | FixedWCS Int -- arbitrary number
   deriving stock (Eq, Show)
 
--- | Usual configuration 'CapabilitiesWCS' and no log
-defaultPoolboySettings :: PoolboySettings
+-- | Usual configuration 'CapabilitiesWCS' and no name
+defaultPoolboySettings :: (HasCallStack) => PoolboySettings
 defaultPoolboySettings =
-  PoolboySettings
-    { workersCount = CapabilitiesWCS,
-      log = \x -> seq x $ return ()
-    }
+  withFrozenCallStack $
+    PoolboySettings
+      { workersCount = CapabilitiesWCS,
+        workQueueName =
+          case listToMaybe $ getCallStack callStack of
+            Nothing -> "<no name>"
+            Just (f, loc) -> "<no name> created in " <> f <> ", called at " <> prettySrcLoc loc
+      }
 
--- | Arbitrary-numbered settings
+-- | Arbitrary-numbered of workers settings
 poolboySettingsWith :: Int -> PoolboySettings
 poolboySettingsWith c = defaultPoolboySettings {workersCount = FixedWCS c}
 
--- | Simple (but not particularly performant) serialized logger
-simpleSerializedLogger :: IO (String -> IO ())
-simpleSerializedLogger = do
-  logLock <- newMVar ()
-  return $ \x ->
-    withMVar logLock $ \() -> do
-      putStrLn x
-      return ()
+-- | Name of the work queue settings (used in error and debugging)
+poolboySettingsName :: String -> PoolboySettings -> PoolboySettings
+poolboySettingsName n s = s {workQueueName = n}
 
 -- | 'backet'-based usage (recommended)
-withPoolboy :: PoolboySettings -> WaitingStopStrategy -> (WorkQueue -> IO a) -> IO a
-withPoolboy settings waitStopWorkQueue = bracket (newPoolboy settings) (\wq -> stopWorkQueue wq >> waitStopWorkQueue wq)
+withPoolboy :: (MonadUnliftIO m) => PoolboySettings -> WaitingStopStrategy m -> (WorkQueue -> m a) -> m a
+withPoolboy settings waitStopWorkQueue =
+  bracket
+    (newPoolboy settings)
+    (\wq -> stopWorkQueue wq >> waitStopWorkQueue wq)
 
 -- | Standalone/manual usage
-newPoolboy :: PoolboySettings -> IO WorkQueue
+newPoolboy :: (MonadUnliftIO m) => PoolboySettings -> m WorkQueue
 newPoolboy settings = do
-  wq <-
-    WorkQueue
-      <$> newTQueueIO
-      <*> newTQueueIO
-      <*> newEmptyMVar
-      <*> newQSemN 0
-
   count <-
     case settings.workersCount of
       CapabilitiesWCS -> getNumCapabilities
       FixedWCS x -> return x
 
-  changeDesiredWorkersCount wq count
-  void $
-    forkIO $
-      controller $
-        WorkQueueControllerState
-          { commands = wq.commands,
-            queue = wq.queue,
-            stopped = wq.stopped,
-            log = settings.log,
-            workers = [],
-            waitingWorkers = wq.waitingWorkers,
-            capabilityCount = 0
-          }
-
-  return wq
+  WorkQueue settings.workQueueName
+    <$> newQSemN count
+    <*> newIORef count
+    <*> newEmptyMVar
+    <*> newIORef mempty
 
 -- | Request a worker number adjustment
-changeDesiredWorkersCount :: WorkQueue -> Int -> IO ()
-changeDesiredWorkersCount wq =
-  atomically . writeTQueue wq.commands . ChangeDesiredWorkersCount
+--
+-- Warning: non-concurrent operation
+changeDesiredWorkersCount :: (MonadUnliftIO m) => WorkQueue -> Int -> m ()
+changeDesiredWorkersCount wq n = do
+  ensureRunning wq
+  refWorkers <- readIORef wq.maxWorkers
+  when (n > 0) $ do
+    writeIORef wq.maxWorkers n
+    if refWorkers < n
+      then signalQSemN wq.availableWorkers $ n - refWorkers
+      else
+        void $
+          async' wq $
+            waitQSemN wq.availableWorkers $
+              refWorkers - n
 
--- | Request stopping wrokers
-stopWorkQueue :: WorkQueue -> IO ()
-stopWorkQueue wq =
-  atomically $ writeTQueue wq.commands Stop
+-- | Request stopping wokers
+stopWorkQueue :: (MonadUnliftIO m) => WorkQueue -> m ()
+stopWorkQueue wq = do
+  stopped <- isStopedWorkQueue wq
+  unless stopped $ do
+    void $ tryPutMVar wq.stopped ()
 
 -- | Non-blocking check of the work queue's running status
-isStopedWorkQueue :: WorkQueue -> IO Bool
-isStopedWorkQueue wq =
-  not <$> isEmptyMVar wq.stopped
+isStopedWorkQueue :: (MonadUnliftIO m) => WorkQueue -> m Bool
+isStopedWorkQueue wq = not <$> isEmptyMVar wq.stopped
 
-type WaitingStopStrategy = WorkQueue -> IO ()
+type WaitingStopStrategy m = WorkQueue -> m ()
 
 -- | Block until the queue is totally stopped (no more running worker)
-waitingStopFinishWorkers :: WaitingStopStrategy
+waitingStopFinishWorkers :: (MonadUnliftIO m) => WaitingStopStrategy m
 waitingStopFinishWorkers wq =
-  void $ tryAny $ readMVar wq.stopped
+  void $
+    retryBlocked 10 $ do
+      readMVar wq.stopped
+      let waitWorkerCompletion = do
+            workers <- readIORef wq.inflightWorkers
+            unless (HM.null workers) $ do
+              forM_ (HM.elems workers) waitCatch
+              atomicModifyIORef wq.inflightWorkers $ \ws ->
+                (foldr HM.delete ws $ HM.keys workers, ())
+              threadDelay 10000
+              waitWorkerCompletion
+
+      waitWorkerCompletion
+      workersCount <- atomicModifyIORef' wq.maxWorkers (0,)
+      waitQSemN wq.availableWorkers workersCount
 
 -- | Block until the queue is totally stopped or deadline (in micro seconds) is reached
-waitingStopTimeout :: Int -> WaitingStopStrategy
+waitingStopTimeout :: (MonadUnliftIO m) => Int -> WaitingStopStrategy m
 waitingStopTimeout delay wq = void $ timeout delay $ waitingStopFinishWorkers wq
 
 -- | Enqueue one action in the work queue (non-blocking)
-enqueue :: WorkQueue -> IO () -> IO ()
-enqueue wq =
-  atomically . writeTQueue wq.queue . Right
+--
+-- Throws 'WorkQueueStoppedException' if the work queue is stopped
+enqueue :: (MonadUnliftIO m) => WorkQueue -> m () -> m ()
+enqueue wq = void . enqueueTracking wq
+
+-- | Enqueue one action in the work queue (non-blocking)
+--
+-- Throws 'WorkQueueStoppedException' if the work queue is stopped
+enqueueTracking :: (MonadUnliftIO m) => WorkQueue -> m a -> m (Async a)
+enqueueTracking wq f = do
+  ensureRunning wq
+  enqueueTrackingAfterUnsafe wq (return ()) f
 
 -- | Block until one worker is available
-waitReadyQueue :: WorkQueue -> IO ()
+waitReadyQueue :: (MonadUnliftIO m) => WorkQueue -> m ()
 waitReadyQueue wq = do
-  waitQSemN wq.waitingWorkers 1
-  signalQSemN wq.waitingWorkers 1
+  ensureRunning wq
+  waitQSemN wq.availableWorkers 1
+  signalQSemN wq.availableWorkers 1
 
 -- | Enqueue action and some actions to be run after it
-enqueueAfter :: Foldable f => WorkQueue -> IO () -> f (IO ()) -> IO ()
-enqueueAfter wq x xs =
-  enqueue wq $ do
-    x
-    forM_ xs $ enqueue wq
+--
+-- Throws 'WorkQueueStoppedException' if the work queue is stopped
+enqueueAfter :: (Traversable f, MonadUnliftIO m) => WorkQueue -> m () -> f (m ()) -> m ()
+enqueueAfter wq x xs = void $ enqueueAfterTracking wq x xs
+
+-- | Enqueue action and some actions to be run after it
+--
+-- Throws 'WorkQueueStoppedException' if the work queue is stopped
+enqueueAfterTracking :: (Traversable f, MonadUnliftIO m) => WorkQueue -> m a -> f (m b) -> m (Async a, f (Async b))
+enqueueAfterTracking wq x xs = do
+  rm <- enqueueTracking wq x
+  st <- forM xs $ enqueueTrackingAfterUnsafe wq (wait rm)
+  return (rm, st)
 
 -- Support (internal)
 data WorkQueue = WorkQueue
-  { commands :: TQueue Commands,
-    queue :: TQueue (Either () (IO ())),
+  { name :: String,
+    availableWorkers :: QSemN,
+    maxWorkers :: IORef Int,
     stopped :: MVar (),
-    waitingWorkers :: QSemN
+    inflightWorkers :: IORef (HM.HashMap ThreadId (Async ()))
   }
 
-data Commands
-  = ChangeDesiredWorkersCount Int
-  | Stop
-  deriving stock (Show)
+-- | Ensure the queue is stopped
+--
+-- Throws 'WorkQueueStoppedException' if not
+ensureRunning :: (MonadUnliftIO m) => WorkQueue -> m ()
+ensureRunning wq = do
+  stopped <- isStopedWorkQueue wq
+  when stopped $
+    throwIO $
+      WorkQueueStoppedException wq.name
 
-data WorkQueueControllerState = WorkQueueControllerState
-  { commands :: TQueue Commands,
-    queue :: TQueue (Either () (IO ())),
-    stopped :: MVar (),
-    log :: String -> IO (),
-    workers :: [Async ()],
-    waitingWorkers :: QSemN,
-    capabilityCount :: Int
-  }
+newtype WorkQueueStoppedException = WorkQueueStoppedException {stoppedWorkQueue :: String}
+  deriving stock (Eq, Show)
 
-controller :: WorkQueueControllerState -> IO ()
-controller wq = do
-  command <- atomically $ readTQueue wq.commands
-  let stopOneWorker = atomically $ writeTQueue wq.queue $ Left ()
-      getLiveWorkers = filterM (fmap isNothing . poll) wq.workers
-      prefix = "Controller: "
-  wq.log $ prefix <> "Command: " <> show command
-  case command of
-    ChangeDesiredWorkersCount n -> do
-      liveWorkers <- getLiveWorkers
-      let diff = length liveWorkers - n
-      (newWorkers, newCapabilityCount) <-
-        if diff > 0
-          then do
-            replicateM_ diff stopOneWorker
-            return ([], wq.capabilityCount)
-          else do
-            let newWorkersCount = abs diff
-            newWorkers <- forM [1 .. newWorkersCount] $ \capability -> do
-              wq.log $ prefix <> "Pre-fork"
-              asyncOn (capability - 1) $ worker $ WorkQueueWorkerState {queue = wq.queue, waitingWorkers = wq.waitingWorkers, log = wq.log}
-            return (newWorkers, wq.capabilityCount + newWorkersCount)
-      controller $ wq {workers = newWorkers <> liveWorkers, capabilityCount = newCapabilityCount}
-    Stop -> do
-      liveWorkers <- getLiveWorkers
-      let currentCount = length liveWorkers
-      wq.log $ prefix <> "Stopping " <> show currentCount <> " workers"
-      waitQSemN wq.waitingWorkers currentCount
-      replicateM_ currentCount stopOneWorker
-      void $ tryPutMVar wq.stopped ()
+instance Exception WorkQueueStoppedException
 
-data WorkQueueWorkerState = WorkQueueWorkerState
-  { queue :: TQueue (Either () (IO ())),
-    waitingWorkers :: QSemN,
-    log :: String -> IO ()
-  }
+-- | Enqueue one action in the work queue (non-blocking)
+--
+-- Does not check if the queue is stopping
+enqueueTrackingAfterUnsafe :: forall a m i. (MonadUnliftIO m) => WorkQueue -> m i -> m a -> m (Async a)
+enqueueTrackingAfterUnsafe wq prerequisite f = do
+  task <-
+    async' wq $ do
+      threadId <- myThreadId
+      void prerequisite
+      bracket_
+        (waitQSemN wq.availableWorkers 1)
+        ( signalQSemN wq.availableWorkers 1
+            >> atomicModifyIORef wq.inflightWorkers (\ws -> (HM.delete threadId ws, ()))
+        )
+        f
+  atomicModifyIORef wq.inflightWorkers (\ws -> (HM.insert (asyncThreadId task) (task $> ()) ws, ()))
+  return task
 
-worker :: WorkQueueWorkerState -> IO ()
-worker wq = do
-  workerId <- show <$> myThreadId
-  let prefix = "Worker [" <> workerId <> "]: "
-  wq.log $ prefix <> "Starting"
-  let loop = do
-        signalQSemN wq.waitingWorkers 1
-        command <- atomically $ readTQueue wq.queue
-        case command of
-          Left () -> do
-            wq.log $ prefix <> "Stopping"
-          Right act -> do
-            waitQSemN wq.waitingWorkers 1
-            wq.log (prefix <> "pop")
-            void (tryAny act)
-            wq.log (prefix <> "poped")
-            loop
-  loop
+-- | Start and label a thread
+async' :: (MonadUnliftIO m) => WorkQueue -> m a -> m (Async a)
+async' wq f = do
+  t <- async f
+  liftIO $ labelThread (asyncThreadId t) wq.name
+  return t
+
+retryBlocked :: (MonadUnliftIO m) => Int -> m a -> m (Either BlockedIndefinitelyOnMVar a)
+retryBlocked n f = do
+  r <- try f
+  case r of
+    Left BlockedIndefinitelyOnMVar
+      | n > 0 -> threadDelay 1000 >> retryBlocked (n - 1) f
+      | otherwise -> try f
+    Right x -> return $ Right x

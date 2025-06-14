@@ -11,7 +11,7 @@
       let
         pkgs = import nixpkgs { inherit system; };
 
-        haskellPackages = pkgs.haskell.packages.ghc94;
+        haskellPackages = pkgs.haskellPackages;
       in
       rec
       {
