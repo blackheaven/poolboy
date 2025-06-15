@@ -39,7 +39,7 @@ import Control.Exception (BlockedIndefinitelyOnMVar (BlockedIndefinitelyOnMVar))
 import Control.Monad
 import Data.Functor (($>))
 import qualified Data.HashMap.Strict as HM
-import Data.Maybe (isJust, listToMaybe)
+import Data.Maybe (fromMaybe, isJust, listToMaybe)
 import GHC.Conc (labelThread)
 import GHC.Stack (HasCallStack, callStack, getCallStack, prettySrcLoc, withFrozenCallStack)
 import UnliftIO (MonadIO (liftIO), MonadUnliftIO)
@@ -272,12 +272,12 @@ instance Exception WorkQueueStoppedException
 enqueueTrackingAfterUnsafe :: forall a m i. (MonadUnliftIO m) => WorkQueue m -> m i -> m a -> m (Async a)
 enqueueTrackingAfterUnsafe wq prerequisite f = do
   wq.onCommand Enqueue
-  let register threadId taskM = atomicModifyIORef wq.inflightWorkers (\ws -> (HM.insert threadId taskM ws, ()))
+  let register f' = atomicModifyIORef wq.inflightWorkers (\ws -> (f' ws, ()))
   task <-
     async' wq $ do
       wq.onCommand SpawnTask
       threadId <- myThreadId
-      register threadId Nothing
+      register $ HM.alter (Just . fromMaybe Nothing) threadId
       void prerequisite
       bracket_
         ( wq.onCommand WaitAvailableWorker
@@ -290,7 +290,7 @@ enqueueTrackingAfterUnsafe wq prerequisite f = do
         )
         f
   wq.onCommand $ flip EnqueueRegisterTask (asyncThreadId task)
-  register (asyncThreadId task) (Just $ task $> ())
+  register $ HM.insert (asyncThreadId task) (Just $ task $> ())
   return task
 
 -- | Start and label a thread

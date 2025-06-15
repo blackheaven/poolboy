@@ -1,3 +1,7 @@
+## 0.4.0.1
+
+* Fix race condition
+
 ## 0.4.0.0
 
 * Fix race conditions
