@@ -1,3 +1,11 @@
+## 0.4.0.0
+
+* Fix race conditions
+* Add command log for debugging
+  * Add `PoolboyCommand`
+  * Add `poolboySettingsLog`
+  * Add `Monad` type parameters to `PoolboySettings` and `WorkQueue`
+
 ## 0.3.0.0
 
 * Use `MonadUnliftIO` in functions

@@ -52,6 +52,52 @@ spec =
         computations `shouldSatisfy` isJust
         duration `shouldSatisfy` (< 2000)
         readIORef counter `shouldReturn` 110
+    replicateM_ 1 $
+      it "nested enqueueing should work on all jobs" $ do
+        counter <- newIORef @Int 0
+        let inc = atomicModifyIORef' counter $ \n -> (n + 1, ())
+        (duration, computations) <-
+          timeItT $
+            timeout 100000000 $
+              withPoolboy (poolboySettingsWith 30) waitingStopFinishWorkers $ \wq -> do
+                replicateM_ 10 $
+                  enqueue wq $ do
+                    inc
+                    enqueue wq $ do
+                      inc
+                      enqueue wq $ do
+                        inc
+                        enqueue wq $ do
+                          inc
+        computations `shouldSatisfy` isJust
+        duration `shouldSatisfy` (< 2000)
+        readIORef counter `shouldReturn` 40
+    replicateM_ 1 $
+      it "nested enqueueing on small pool should work on all jobs" $ do
+        counter <- newIORef @Int 0
+        tracesRef <- newIORef mempty
+        let inc = atomicModifyIORef' counter $ \n -> (n + 1, ())
+            addTrace c = atomicModifyIORef' tracesRef $ \cs -> (c : cs, ())
+        (duration, computations) <-
+          timeItT $
+            timeout 100000000 $
+              withPoolboy (poolboySettingsLog addTrace $ poolboySettingsWith 5) waitingStopFinishWorkers $ \wq -> do
+                replicateM_ 5 $
+                  enqueue wq $ do
+                    inc
+                    enqueue wq $ do
+                      inc
+                      enqueue wq $ do
+                        inc
+                        enqueue wq $ do
+                          inc
+        computations `shouldSatisfy` isJust
+        duration `shouldSatisfy` (< 2000)
+        c <- readIORef counter
+        when (c /= 20) $ do
+          cs <- readIORef tracesRef
+          forM_ (reverse cs) print
+        readIORef counter `shouldReturn` 20
 
 data RandomException = RandomException
   deriving (Show)
