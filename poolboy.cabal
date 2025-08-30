@@ -24,6 +24,7 @@ library
   hs-source-dirs: src
   exposed-modules:
       Data.Poolboy
+      Data.Poolboy.Tactics
   other-modules:
       Paths_poolboy
   autogen-modules:

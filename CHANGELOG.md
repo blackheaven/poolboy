@@ -1,3 +1,7 @@
+## 0.4.1.0
+
+* Add helpers in `Data.Poolboy.Tactics`
+
 ## 0.4.0.1
 
 * Fix race condition
