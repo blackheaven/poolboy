@@ -1,5 +1,22 @@
 {-# LANGUAGE TupleSections #-}
 
+--- |
+-- Module      :  Data.Poolboy
+-- Copyright   :  Gautier DI FOLCO 2024-2025
+-- License     :  ISC
+--
+-- Maintainer  :  foos@difolco.dev
+-- Stability   :  experimental
+-- Portability :  GHC
+--
+-- A simple work queue for bounded concurrency.
+--
+-- @
+-- withPoolboy defaultPoolboySettings waitingStopFinishWorkers $ \workQueue ->
+--    mapM_ (enqueue workQueue . execQuery insertBookQuery) books
+-- @
+--
+
 module Data.Poolboy
   ( -- * Configuration
     PoolboySettings (..),
