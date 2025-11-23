@@ -1,16 +1,16 @@
 cabal-version:       3.0
-name:                poolboy
-version:             0.5.0.0
+name:                effectful-poolboy
+version:             0.1.0.0
 author:              Gautier DI FOLCO
 maintainer:          foss@difolco.dev
 category:            Data
 build-type:          Simple
 license:             ISC
 license-file:        LICENSE
-synopsis:            Simple work queue for bounded concurrency
-description:         In-memory work queue helping with load management.
+synopsis:            Simple work queue for bounded concurrency (effectful wrapper)
+description:         In-memory work queue helping with load management (effectful wrapper).
 Homepage:            https://github.com/blackheaven/poolboy
-tested-with:         GHC==9.10.3
+tested-with:         GHC==9.10.4
 
 extra-source-files:
     CHANGELOG.md
@@ -19,16 +19,17 @@ library
   default-language:   Haskell2010
   build-depends:
       base >= 4.2 && <5
-    , unordered-containers >= 0.2.10.0 && <3
-    , unliftio == 0.2.*
+    , async == 2.*
+    , effectful-core >= 2.3.0.0 && < 2.7
+    , poolboy >= 0.5.0.0 && <0.6
   hs-source-dirs: src
   exposed-modules:
-      Data.Poolboy
-      Data.Poolboy.Tactics
+      Data.Poolboy.Effectful
+      Data.Poolboy.Tactics.Effectful
   other-modules:
-      Paths_poolboy
+      Paths_effectful_poolboy
   autogen-modules:
-      Paths_poolboy
+      Paths_effectful_poolboy
   default-extensions:
       DataKinds
       DefaultSignatures
@@ -57,9 +58,9 @@ test-suite spec
   hs-source-dirs: test
   main-is: Spec.hs
   other-modules:
-      Paths_poolboy
+      Paths_effectful_poolboy
   autogen-modules:
-      Paths_poolboy
+      Paths_effectful_poolboy
   default-extensions:
       DataKinds
       DefaultSignatures
@@ -84,8 +85,12 @@ test-suite spec
   ghc-options: -threaded -rtsopts -with-rtsopts=-N -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wpartial-fields -Wredundant-constraints
   build-depends:
       base
-    , poolboy
+    , async
+    , effectful
+    , effectful-core
+    , effectful-poolboy
     , hspec
     , hspec-core
+    , poolboy
     , timeit >= 1.0.0.0 && < 3
   default-language: Haskell2010

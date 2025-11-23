@@ -1,3 +1,4 @@
+{-# LANGUAGE StrictData #-}
 {-# LANGUAGE TupleSections #-}
 
 --- |
@@ -26,11 +27,13 @@ module Data.Poolboy
     poolboySettingsWith,
     poolboySettingsName,
     poolboySettingsLog,
+    hoistPoolboySettings,
 
     -- * Running
     WorkQueue,
     withPoolboy,
     newPoolboy,
+    hoistWorkQueue,
 
     -- * Driving
     changeDesiredWorkersCount,
@@ -38,7 +41,7 @@ module Data.Poolboy
 
     -- * Stopping
     stopWorkQueue,
-    isStopedWorkQueue,
+    isStoppedWorkQueue,
     WaitingStopStrategy,
     waitingStopTimeout,
     waitingStopFinishWorkers,
@@ -73,6 +76,10 @@ data PoolboySettings m = PoolboySettings
     workQueueName :: String,
     logger :: PoolboyCommand -> m ()
   }
+
+-- | Change 'PoolboySettings' monad
+hoistPoolboySettings :: (forall a. m a -> n a) -> PoolboySettings m -> PoolboySettings n
+hoistPoolboySettings hoist PoolboySettings {..} = PoolboySettings {logger = hoist . logger, ..}
 
 -- | Initial number of threads
 data WorkersCountSettings
@@ -174,16 +181,16 @@ changeDesiredWorkersCount wq n = do
             refWorkers - n
 
 -- | Request stopping wokers
-stopWorkQueue :: (MonadUnliftIO m) => WorkQueue m -> m ()
+stopWorkQueue :: (MonadIO m) => WorkQueue m -> m ()
 stopWorkQueue wq = do
-  stopped <- isStopedWorkQueue wq
+  stopped <- isStoppedWorkQueue wq
   unless stopped $ do
     wq.onCommand SetStoppedWorkQueue
     void $ tryPutMVar wq.stopped ()
 
 -- | Non-blocking check of the work queue's running status
-isStopedWorkQueue :: (MonadUnliftIO m) => WorkQueue m -> m Bool
-isStopedWorkQueue wq = not <$> isEmptyMVar wq.stopped
+isStoppedWorkQueue :: (MonadIO m) => WorkQueue m -> m Bool
+isStoppedWorkQueue wq = not <$> isEmptyMVar wq.stopped
 
 type WaitingStopStrategy m = WorkQueue m -> m ()
 
@@ -264,12 +271,16 @@ data WorkQueue m = WorkQueue
     inflightWorkers :: IORef (HM.HashMap ThreadId (Maybe (Async ())))
   }
 
+-- | Change 'WorkQueue' monad
+hoistWorkQueue :: (forall a. m a -> n a) -> WorkQueue m -> WorkQueue n
+hoistWorkQueue hoist WorkQueue {..} = WorkQueue {onCommand = hoist . onCommand, ..}
+
 -- | Ensure the queue is stopped
 --
 -- Throws 'WorkQueueStoppedException' if not
 ensureRunning :: (MonadUnliftIO m) => WorkQueue m -> m ()
 ensureRunning wq = do
-  stopped <- isStopedWorkQueue wq
+  stopped <- isStoppedWorkQueue wq
   threadId <- myThreadId
   workers <- readIORef wq.inflightWorkers
   let isRunning = not stopped || HM.member threadId workers

@@ -1,5 +1,5 @@
---- |
--- Module      :  Data.Poolboy.Tactics
+-- |
+-- Module      : Data.Poolboy.Tactics.Effectful
 -- Copyright   :  Gautier DI FOLCO 2024-2025
 -- License     :  ISC
 --
@@ -8,9 +8,7 @@
 -- Portability :  GHC
 --
 -- A simple set of concurrent primitives.
---
-
-module Data.Poolboy.Tactics
+module Data.Poolboy.Tactics.Effectful
   ( -- * Do not accumulate
     concurrentFoldable_,
     concurrentRecursive_,
@@ -24,10 +22,9 @@ module Data.Poolboy.Tactics
   )
 where
 
-import Control.Monad (forM_, void)
-import Data.Poolboy
-import UnliftIO (MonadUnliftIO)
-import UnliftIO.IORef
+import qualified Data.Poolboy as PB
+import qualified Data.Poolboy.Tactics as PB
+import Effectful
 
 -- | Concurrently run a set of actions.
 --
@@ -35,13 +32,13 @@ import UnliftIO.IORef
 --
 -- > concurrentFoldable_ defaultPoolboySettings [sendEmail, saveOrderDB, notifyUser]
 concurrentFoldable_ ::
-  (Foldable f, MonadUnliftIO m) =>
-  PoolboySettings m ->
-  f (m a) ->
-  m ()
+  (Foldable f, Functor f, IOE :> es) =>
+  PB.PoolboySettings (Eff es) ->
+  f (Eff es a) ->
+  Eff es ()
 concurrentFoldable_ settings actions =
-  withPoolboy settings waitingStopFinishWorkers $ \workQueue ->
-    mapM_ (enqueue workQueue . void) actions
+  withEffToIO (ConcUnlift Ephemeral Unlimited) $ \(toIO :: forall b. Eff es b -> IO b) -> do
+    PB.concurrentFoldable_ (PB.hoistPoolboySettings toIO settings) (toIO <$> actions)
 
 -- | Concurrently run a set of actions, recursively.
 --
@@ -49,16 +46,14 @@ concurrentFoldable_ settings actions =
 --
 -- > concurrentRecursive_ defaultPoolboySettings listDirectories [listDirectories "."]
 concurrentRecursive_ ::
-  (Foldable f, MonadUnliftIO m) =>
-  PoolboySettings m ->
-  (a -> f (m a)) ->
-  f (m a) ->
-  m ()
+  (Foldable f, Functor f, IOE :> es) =>
+  PB.PoolboySettings (Eff es) ->
+  (a -> f (Eff es a)) ->
+  f (Eff es a) ->
+  Eff es ()
 concurrentRecursive_ settings recurse actions =
-  withPoolboy settings waitingStopFinishWorkers $ \workQueue ->
-    let wrap action = action >>= go . recurse
-        go = mapM_ (enqueue workQueue . wrap)
-     in go actions
+  withEffToIO (ConcUnlift Ephemeral Unlimited) $ \(toIO :: forall b. Eff es b -> IO b) -> do
+    PB.concurrentRecursive_ (PB.hoistPoolboySettings toIO settings) ((toIO <$>) . recurse) (toIO <$> actions)
 
 -- | Concurrently run a dynamic set of actions until it gets a 'Nothing'.
 --
@@ -66,18 +61,13 @@ concurrentRecursive_ settings recurse actions =
 --
 -- > concurrentM_ defaultPoolboySettings waitNextRequest
 concurrentM_ ::
-  (MonadUnliftIO m) =>
-  PoolboySettings m ->
-  m (Maybe (m a)) ->
-  m ()
+  (IOE :> es) =>
+  PB.PoolboySettings (Eff es) ->
+  Eff es (Maybe (Eff es a)) ->
+  Eff es ()
 concurrentM_ settings fetchNextAction =
-  withPoolboy settings waitingStopFinishWorkers $ \workQueue ->
-    let go = do
-          mNextAction <- fetchNextAction
-          forM_ mNextAction $ \nextAction -> do
-            enqueue workQueue $ void nextAction
-            go
-     in go
+  withEffToIO (ConcUnlift Ephemeral Unlimited) $ \(toIO :: forall b. Eff es b -> IO b) -> do
+    PB.concurrentM_ (PB.hoistPoolboySettings toIO settings) (toIO $ fmap toIO <$> fetchNextAction)
 
 -- | Concurrently run a set of actions, accumulating results.
 --
@@ -87,17 +77,13 @@ concurrentM_ settings fetchNextAction =
 --
 -- > concurrentFoldable defaultPoolboySettings [sendEmail, saveOrderDB, notifyUser]
 concurrentFoldable ::
-  (Functor f, Foldable f, MonadUnliftIO m) =>
-  PoolboySettings m ->
-  f (m a) ->
-  m [a]
+  (Functor f, Foldable f, IOE :> es) =>
+  PB.PoolboySettings (Eff es) ->
+  f (Eff es a) ->
+  Eff es [a]
 concurrentFoldable settings actions = do
-  accumulator <- newIORef mempty
-  let accumulate action = do
-        result <- action
-        atomicModifyIORef' accumulator $ \acc -> (result : acc, ())
-  concurrentFoldable_ settings $ accumulate <$> actions
-  readIORef accumulator
+  withEffToIO (ConcUnlift Ephemeral Unlimited) $ \(toIO :: forall b. Eff es b -> IO b) -> do
+    PB.concurrentFoldable (PB.hoistPoolboySettings toIO settings) (toIO <$> actions)
 
 -- | Concurrently run a set of actions, recursively, accumulating results.
 --
@@ -107,15 +93,14 @@ concurrentFoldable settings actions = do
 --
 -- > concurrentRecursive defaultPoolboySettings listDirectories [listDirectories "."]
 concurrentRecursive ::
-  (Functor f, Foldable f, MonadUnliftIO m) =>
-  PoolboySettings m ->
-  (a -> f (m a)) ->
-  f (m a) ->
-  m [a]
+  (Functor f, Foldable f, IOE :> es) =>
+  PB.PoolboySettings (Eff es) ->
+  (a -> f (Eff es a)) ->
+  f (Eff es a) ->
+  Eff es [a]
 concurrentRecursive settings recurse actions =
-  let dup x = (x, x)
-      dups = fmap (fmap dup)
-   in concurrentRecursive' settings (dups . recurse) (dups actions)
+  withEffToIO (ConcUnlift Ephemeral Unlimited) $ \(toIO :: forall b. Eff es b -> IO b) -> do
+    PB.concurrentRecursive (PB.hoistPoolboySettings toIO settings) ((toIO <$>) . recurse) (toIO <$> actions)
 
 -- | Concurrently run a set of actions, recursively, accumulating results.
 --
@@ -125,19 +110,14 @@ concurrentRecursive settings recurse actions =
 --
 -- > concurrentRecursive' defaultPoolboySettings listDirectories [listDirectories "."]
 concurrentRecursive' ::
-  (Functor f, Foldable f, MonadUnliftIO m) =>
-  PoolboySettings m ->
-  (a -> f (m (a, b))) ->
-  f (m (a, b)) ->
-  m [b]
+  (Functor f, Foldable f, IOE :> es) =>
+  PB.PoolboySettings (Eff es) ->
+  (a -> f (Eff es (a, b))) ->
+  f (Eff es (a, b)) ->
+  Eff es [b]
 concurrentRecursive' settings recurse actions = do
-  accumulator <- newIORef mempty
-  let accumulate action = do
-        (resultNext, resultAccumulate) <- action
-        atomicModifyIORef' accumulator $ \acc -> (resultAccumulate : acc, ())
-        return resultNext
-  concurrentRecursive_ settings (fmap accumulate . recurse) $ accumulate <$> actions
-  readIORef accumulator
+  withEffToIO (ConcUnlift Ephemeral Unlimited) $ \(toIO :: forall b. Eff es b -> IO b) -> do
+    PB.concurrentRecursive' (PB.hoistPoolboySettings toIO settings) ((toIO <$>) . recurse) (toIO <$> actions)
 
 -- | Concurrently run a dynamic set of actions until it gets a 'Nothing', accumulating results.
 --
@@ -147,14 +127,10 @@ concurrentRecursive' settings recurse actions = do
 --
 -- > concurrentM defaultPoolboySettings waitNextRequest
 concurrentM ::
-  (MonadUnliftIO m) =>
-  PoolboySettings m ->
-  m (Maybe (m a)) ->
-  m [a]
+  (IOE :> es) =>
+  PB.PoolboySettings (Eff es) ->
+  Eff es (Maybe (Eff es a)) ->
+  Eff es [a]
 concurrentM settings fetchNextAction = do
-  accumulator <- newIORef mempty
-  let accumulate action = do
-        result <- action
-        atomicModifyIORef' accumulator $ \acc -> (result : acc, ())
-  concurrentM_ settings $ fmap accumulate <$> fetchNextAction
-  readIORef accumulator
+  withEffToIO (ConcUnlift Ephemeral Unlimited) $ \(toIO :: forall b. Eff es b -> IO b) -> do
+    PB.concurrentM (PB.hoistPoolboySettings toIO settings) (toIO $ fmap toIO <$> fetchNextAction)

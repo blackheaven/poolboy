@@ -1,3 +1,4 @@
-packages: *.cabal
+packages: */*.cabal
 
 package poolboy
+package effectful-poolboy

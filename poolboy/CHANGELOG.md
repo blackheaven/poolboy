@@ -1,3 +1,8 @@
+## 0.5.0.0
+
+* Add helpers on `WorkQueue` and `PoolboySettings` in `Data.Poolboy`
+* Rename `isStopedWorkQueue` to `isStoppedWorkQueue` in `Data.Poolboy`
+
 ## 0.4.1.0
 
 * Add helpers in `Data.Poolboy.Tactics`

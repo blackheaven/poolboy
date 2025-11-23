@@ -17,30 +17,26 @@
       {
         packages.poolboy =
           # activateBenchmark
-          (haskellPackages.callCabal2nix "poolboy" ./. {
+          (haskellPackages.callCabal2nix "poolboy" ./poolboy {
             # Dependency overrides go here
+          });
+
+        packages.effectful-poolboy =
+          # activateBenchmark
+          (haskellPackages.callCabal2nix "effectful-poolboy" ./effectful-poolboy {
+            poolboy = packages.poolboy;
           });
 
         defaultPackage = packages.poolboy;
 
         devShell =
-          let
-            scripts = pkgs.symlinkJoin {
-              name = "scripts";
-              paths = pkgs.lib.mapAttrsToList pkgs.writeShellScriptBin {
-                ormolu = ''
-                  ${pkgs.ormolu}/bin/ormolu -o -XNoImportQualifiedPost $@
-                '';
-              };
-            };
-          in
           pkgs.mkShell {
             buildInputs = with haskellPackages; [
               haskell-language-server
               ghcid
               cabal-install
               haskell-ci
-              scripts
+              ormolu
             ];
             inputsFrom = [
               self.defaultPackage.${system}.env
