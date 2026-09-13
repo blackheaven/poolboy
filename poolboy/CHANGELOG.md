@@ -1,3 +1,7 @@
+## 0.5.0.1
+
+* Test with GHC 9.12.4 and 9.14.1
+
 ## 0.5.0.0
 
 * Add helpers on `WorkQueue` and `PoolboySettings` in `Data.Poolboy`
