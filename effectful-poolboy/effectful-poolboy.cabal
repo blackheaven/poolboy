@@ -10,7 +10,7 @@ license-file:        LICENSE
 synopsis:            Simple work queue for bounded concurrency (effectful wrapper)
 description:         In-memory work queue helping with load management (effectful wrapper).
 Homepage:            https://github.com/blackheaven/poolboy
-tested-with:         GHC==9.10.4
+tested-with:         GHC == { 9.12.4, 9.14.1 }
 
 extra-source-files:
     CHANGELOG.md
@@ -20,7 +20,7 @@ library
   build-depends:
       base >= 4.2 && <5
     , async == 2.*
-    , effectful-core >= 2.3.0.0 && < 2.7
+    , effectful-core >= 2.3.0.0 && < 2.8
     , poolboy >= 0.5.0.0 && <0.6
   hs-source-dirs: src
   exposed-modules:
